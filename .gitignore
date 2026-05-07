@@ -131,3 +131,5 @@ dmypy.json
 
 .devcontainer/
 .vscode/
+*.code-workspace
+.claude/
