@@ -17,6 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 extensions = ["cloud-volume"]
+vast = ["vastdb"]
 
 [tool.setuptools.packages.find]
 include = ["kvdbclient*"]

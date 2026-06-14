@@ -31,8 +31,11 @@ from .bigtable.client import Client as BigTableClient
 from .hbase import HBaseConfig
 from .hbase import get_client_info as get_hbase_client_info
 from .hbase.client import Client as HBaseClient
+from .vast import VastConfig
+from .vast import get_client_info as get_vast_client_info
+from .vast.client import Client as VastClient
 
-ClientType = Union[BigTableClient, HBaseClient]
+ClientType = Union[BigTableClient, HBaseClient, VastClient]
 
 
 _backend_clientinfo_fields = ("TYPE", "CONFIG")
@@ -51,6 +54,8 @@ def get_client_class(backend_type: str = "bigtable"):
         return BigTableClient
     elif backend_type == "hbase":
         return HBaseClient
+    elif backend_type == "vast":
+        return VastClient
     else:
         raise ValueError(f"Unknown backend type: {backend_type}")
 
@@ -63,6 +68,10 @@ def get_default_client_info():
     if backend_type == "hbase":
         return BackendClientInfo(
             TYPE="hbase", CONFIG=get_hbase_client_info()
+        )
+    if backend_type == "vast":
+        return BackendClientInfo(
+            TYPE="vast", CONFIG=get_vast_client_info()
         )
 
     return BackendClientInfo(
