@@ -28,3 +28,21 @@ filterwarnings = [
     "ignore:Connecting to Bigtable emulator:RuntimeWarning",
     "ignore:urllib3",
 ]
+
+# Pixi: reproducible test environment for the optional `vast` backend.
+# Added for the pcgvast effort (zen-ACG). `pixi run test` for the targeted
+# vast + factory suite; `pixi run test-vast-live` for the gated live VAST run.
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[tool.pixi.dependencies]
+python = "3.12.*"
+
+[tool.pixi.pypi-dependencies]
+pytest = "*"
+kvdbclient = { path = ".", editable = true, extras = ["vast"] }
+
+[tool.pixi.tasks]
+test = "pytest tests/test_vast_client.py tests/test_init.py -q"
+test-vast-live = "RUN_VAST_INTEGRATION=1 VAST_TEST_SCHEMA=pcgvast_test pytest tests/test_vast_client.py -q"

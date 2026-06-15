@@ -110,6 +110,9 @@ ENV/
 env.bak/
 venv.bak/
 
+# Pixi (commit pixi.lock, not the solved env)
+.pixi/
+
 # Spyder project settings
 .spyderproject
 .spyproject
