@@ -24,6 +24,9 @@ include = ["kvdbclient*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "integration: live backend test, gated by RUN_VAST_INTEGRATION=1 (pcgvast)",
+]
 filterwarnings = [
     "ignore:Connecting to Bigtable emulator:RuntimeWarning",
     "ignore:urllib3",

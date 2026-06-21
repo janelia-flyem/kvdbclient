@@ -1,4 +1,5 @@
 import os
+import pathlib
 import signal
 import socket
 import subprocess
@@ -157,3 +158,100 @@ def bt_client_short_expiry(bt_config):
     client = Client(table_id=table_id, config=bt_config, lock_expiry=timedelta(seconds=1))
     client.create_table(meta={"test": True}, version="0.0.1")
     yield client
+
+
+# ── VAST live integration fixtures (gated, fail-closed) ──────────────────
+#
+# Seeded from the read-only probe tmp/inspect_vast.py in the zen-ACG workspace.
+# These run ONLY when RUN_VAST_INTEGRATION=1 and a dedicated, non-production
+# VAST_TEST_SCHEMA is set. They fail closed otherwise so a misconfigured run can
+# never create/drop tables in the production `pcgvast` cells or the existing
+# `autoproof` schema (pcgvast-0002 design decision D4). Helper/encoding tests
+# stay non-gated; only tests that need a live backend take `vast_session`.
+
+# Schemas integration tests must never create or drop tables in: the production
+# PCG schema, the kvdbclient default, and the live neighbor observed on the
+# Janelia cluster (sessions/reports/vast-live-grounding.md).
+VAST_PROTECTED_SCHEMAS = frozenset({"pcgvast", "pychunkedgraph", "autoproof"})
+
+
+def _load_dotenv(path):
+    """Minimal ``KEY=VALUE`` .env reader (mirrors tmp/inspect_vast.py).
+
+    Returns a dict; ignores comments/blank lines and strips one layer of quotes.
+    Lets the gated suite read the same VAST_* credentials the kvdbclient.vast
+    backend reads at runtime, without adding a python-dotenv dependency.
+    """
+    env = {}
+    path = pathlib.Path(path)
+    if not path.exists():
+        return env
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        env[k.strip()] = v.strip().strip('"').strip("'")
+    return env
+
+
+@pytest.fixture(scope="session")
+def vast_live_config():
+    """Gated, fail-closed ``VastConfig`` pinned to a dedicated test schema.
+
+    Skips unless ``RUN_VAST_INTEGRATION=1``. Loads ``<repo>/.env`` for the
+    ``VAST_*`` connection vars (without clobbering vars already exported, so the
+    pixi ``test-vast-live`` task's ``VAST_TEST_SCHEMA`` wins), then refuses to
+    proceed unless a non-production ``VAST_TEST_SCHEMA`` and complete connection
+    settings are present.
+    """
+    if os.environ.get("RUN_VAST_INTEGRATION") != "1":
+        pytest.skip("live VAST integration disabled (set RUN_VAST_INTEGRATION=1)")
+
+    repo_root = pathlib.Path(__file__).resolve().parents[1]
+    for key, value in _load_dotenv(repo_root / ".env").items():
+        os.environ.setdefault(key, value)
+
+    test_schema = os.environ.get("VAST_TEST_SCHEMA")
+    if not test_schema:
+        pytest.fail("VAST_TEST_SCHEMA must be set for live integration runs")
+    if test_schema in VAST_PROTECTED_SCHEMAS:
+        pytest.fail(
+            f"refusing to run integration tests against protected schema "
+            f"{test_schema!r}; use a dedicated test schema (e.g. pcgvast_test)"
+        )
+
+    from kvdbclient.vast import get_client_info
+
+    config = get_client_info(schema=test_schema)
+    missing = [
+        name
+        for name in ("ENDPOINT", "ACCESS_KEY", "SECRET_KEY", "BUCKET")
+        if not getattr(config, name)
+    ]
+    if missing:
+        pytest.fail(f"incomplete VAST_* connection settings: missing {missing}")
+    assert config.SCHEMA == test_schema  # guard against env-precedence surprises
+    return config
+
+
+@pytest.fixture()
+def vast_session(vast_live_config):
+    """Open a live ``vastdb`` session from the gated config."""
+    import vastdb
+
+    session = vastdb.connect(
+        endpoint=vast_live_config.ENDPOINT,
+        access=vast_live_config.ACCESS_KEY,
+        secret=vast_live_config.SECRET_KEY,
+    )
+    yield session
+
+
+def vast_test_table_name():
+    """A unique, fail-safe ``test_``-prefixed table name for live tests.
+
+    pcgvast-0002 D4 requires integration tables to start with ``test_`` so a
+    stray name can never collide with real PCG tables; teardown drops them.
+    """
+    return f"test_{uuid.uuid4().hex[:12]}"

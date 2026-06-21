@@ -466,7 +466,7 @@ packages:
 - pypi: ./
   name: kvdbclient
   version: 0.7.0
-  sha256: ed35b71330c08bd946468965f124ce701d1d2c796b6819497e26402654c6515f
+  sha256: 9f58def84ce35853e4243dd13fad3ad606fccea03696c98bcaa572043a81629b
   requires_dist:
   - numpy
   - zstandard>=0.23.0

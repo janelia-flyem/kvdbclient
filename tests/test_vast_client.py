@@ -26,6 +26,31 @@ class TestVastFactoryWiring:
         assert VastClient.__abstractmethods__ == frozenset()
 
 
+# ── Live connectivity (gated; seed of the pcgvast-0002 live path) ─────────
+#
+# Proves the read/connect path against the real Janelia VAST-DB that the probe
+# tmp/inspect_vast.py demonstrated, now as a gated test. Runs only when
+# RUN_VAST_INTEGRATION=1 with a fail-closed VAST_TEST_SCHEMA (see conftest's
+# vast_session / vast_live_config). Makes no writes. The read/write/meta cases
+# below remain skipped until the pcgvast-0002 primitives land.
+
+
+@pytest.mark.integration
+class TestVastLiveConnectivity:
+    def test_session_and_elysium_gate(self, vast_session):
+        # pcgvast-0002 D5: sorted (Elysium) tables are a runtime hard gate.
+        # check_elysium() raises NotSupportedVersion on an unsupported cluster.
+        vast_session.features.check_elysium()
+        assert vast_session.features.vast_version >= (5, 3)
+
+    def test_lists_schemas_readonly(self, vast_session, vast_live_config):
+        # A real read against the bucket; confirms creds + endpoint resolve.
+        with vast_session.transaction() as tx:
+            bucket = tx.bucket(vast_live_config.BUCKET)
+            schema_names = [s.name for s in bucket.schemas()]
+        assert isinstance(schema_names, list)
+
+
 # ── Use-case parity with bigtable/hbase (pending VAST primitives) ─────────
 #
 # As each primitive lands, port the corresponding cases from
