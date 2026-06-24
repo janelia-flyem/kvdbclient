@@ -13,6 +13,7 @@ from kvdbclient.bigtable import BigTableConfig
 from kvdbclient.bigtable.client import Client
 from kvdbclient.hbase import HBaseConfig
 from kvdbclient.hbase.client import Client as HBaseClient
+from kvdbclient.vast.client import Client as VastClient
 from hbase_mock_server import start_hbase_mock_server
 
 
@@ -255,3 +256,67 @@ def vast_test_table_name():
     stray name can never collide with real PCG tables; teardown drops them.
     """
     return f"test_{uuid.uuid4().hex[:12]}"
+
+
+def _drop_vast_test_table(config, table_id):
+    if config.SCHEMA in VAST_PROTECTED_SCHEMAS:
+        raise RuntimeError(f"refusing to drop from protected schema {config.SCHEMA!r}")
+    if not table_id.startswith("test_"):
+        raise RuntimeError(f"refusing to drop non-test VAST table {table_id!r}")
+
+    import vastdb
+
+    session = vastdb.connect(
+        endpoint=config.ENDPOINT,
+        access=config.ACCESS_KEY,
+        secret=config.SECRET_KEY,
+    )
+    with session.transaction() as tx:
+        schema = tx.bucket(config.BUCKET).schema(config.SCHEMA, fail_if_missing=False)
+        if schema is None:
+            return
+        table = schema.table(table_id, fail_if_missing=False)
+        if table is not None:
+            table.drop()
+
+
+@pytest.fixture()
+def vast_client(vast_live_config):
+    table_id = vast_test_table_name()
+    client = VastClient(table_id=table_id, config=vast_live_config)
+    created = False
+    try:
+        client.create_table(meta={"test": True}, version="0.0.1")
+        created = True
+        yield client
+    finally:
+        client.close()
+        if created:
+            _drop_vast_test_table(vast_live_config, table_id)
+
+
+@pytest.fixture()
+def vast_client_no_table(vast_live_config):
+    table_id = vast_test_table_name()
+    client = VastClient(table_id=table_id, config=vast_live_config)
+    try:
+        yield client
+    finally:
+        client.close()
+        _drop_vast_test_table(vast_live_config, table_id)
+
+
+@pytest.fixture()
+def vast_client_small_batch(vast_live_config):
+    config = vast_live_config._replace(MAX_ROW_KEY_COUNT=2)
+    table_id = vast_test_table_name()
+    client = VastClient(table_id=table_id, config=config)
+    created = False
+    try:
+        client.create_table(meta={"test": True}, version="0.0.1")
+        created = True
+        yield client
+    finally:
+        client.close()
+        if created:
+            _drop_vast_test_table(config, table_id)

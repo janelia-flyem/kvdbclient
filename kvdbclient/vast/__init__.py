@@ -20,9 +20,32 @@ _vastconfig_defaults = (
     environ.get("VAST_SCHEMA", DEFAULT_SCHEMA),
     1000,
 )
-VastConfig = namedtuple(
+_VastConfigBase = namedtuple(
     "VastConfig", _vastconfig_fields, defaults=_vastconfig_defaults
 )
+
+
+def _redact_secret(value):
+    if value is None:
+        return None
+    value = str(value)
+    if len(value) <= 4:
+        return "***"
+    return f"***{value[-4:]}"
+
+
+class VastConfig(_VastConfigBase):
+    __slots__ = ()
+
+    def __repr__(self):
+        values = []
+        for name, value in zip(self._fields, self):
+            if name in {"ACCESS_KEY", "SECRET_KEY"}:
+                value = _redact_secret(value)
+            values.append(f"{name}={value!r}")
+        return f"{type(self).__name__}({', '.join(values)})"
+
+    __str__ = __repr__
 
 
 def get_client_info(
