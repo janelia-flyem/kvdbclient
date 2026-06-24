@@ -22,12 +22,23 @@ Optional environment:
 The failing call is:
     schema.create_table(..., sorting_key=["row_key"])
 
-The projection probe tests the separate semi-sorted projection path:
+The projection probe tests the separate semi-sorted projection path. On this
+cluster its DDL succeeds but reads never see the inserted rows, so the probe
+also reproduces that second failure: it creates an unsorted table, adds
+
     table.create_projection(
         "by_row_key",
         sorted_columns=["row_key"],
         unsorted_columns=["family", "qualifier", "ts", "value"],
     )
+
+inserts rows, waits for projection maintenance, then reads the table twice ---
+once forced off the projection (QueryConfig(use_semi_sorted_projections=False))
+and once forced onto it (use_semi_sorted_projections=True,
+semi_sorted_projection_name="by_row_key"). The bug is reproduced when the
+base-table read returns the rows while the forced-projection read (and
+projection.stats.num_rows) returns zero. Tune with --num-row-keys and
+--settle-seconds.
 """
 
 from __future__ import annotations
@@ -35,12 +46,15 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 import traceback
 import uuid
+from datetime import datetime, timedelta
 from importlib import metadata
 
 import pyarrow as pa
 import vastdb
+from vastdb.config import QueryConfig
 
 
 SORTING_KEY = ["row_key"]
@@ -71,6 +85,18 @@ def _parse_args() -> argparse.Namespace:
         choices=("sorted", "projection", "both"),
         default=os.environ.get("VAST_PROBE", "sorted"),
         help="which probe to run; default: sorted",
+    )
+    parser.add_argument(
+        "--num-row-keys",
+        type=int,
+        default=int(os.environ.get("VAST_PROBE_ROW_KEYS", "1024")),
+        help="rows to insert for the projection read probe; default: 1024",
+    )
+    parser.add_argument(
+        "--settle-seconds",
+        type=float,
+        default=float(os.environ.get("VAST_PROBE_SETTLE_SECONDS", "5.0")),
+        help="seconds to wait for projection maintenance before reading; default: 5.0",
     )
     return parser.parse_args()
 
@@ -158,15 +184,55 @@ def _probe_sorted_create_table(
             _cleanup_table(session, bucket_name, schema_name, table_name)
 
 
+def _make_probe_rows(columns: pa.Schema, num_row_keys: int) -> pa.Table:
+    base_time = datetime(2026, 1, 1)
+    row_key, family, qualifier, ts, value = [], [], [], [], []
+    for index in range(num_row_keys):
+        key = f"{index:020d}"
+        row_key.append(key)
+        family.append("0")
+        qualifier.append(b"children")
+        ts.append(base_time + timedelta(microseconds=index))
+        value.append(f"v:{key}".encode("ascii"))
+    return pa.table(
+        {
+            "row_key": row_key,
+            "family": family,
+            "qualifier": qualifier,
+            "ts": ts,
+            "value": value,
+        },
+        schema=columns,
+    )
+
+
+def _read_row_count(table, use_projection: bool) -> int:
+    if use_projection:
+        config = QueryConfig(
+            use_semi_sorted_projections=True,
+            semi_sorted_projection_name="by_row_key",
+        )
+    else:
+        config = QueryConfig(use_semi_sorted_projections=False)
+    return table.select(
+        columns=list(table.columns().names),
+        predicate=None,
+        config=config,
+    ).read_all().num_rows
+
+
 def _probe_projection(
     session,
     bucket_name: str,
     schema_name: str,
     table_name: str,
     columns: pa.Schema,
+    num_row_keys: int,
+    settle_seconds: float,
 ) -> bool:
     created = False
     try:
+        # 1) DDL: unsorted table + semi-sorted projection, then insert rows.
         with session.transaction() as tx:
             schema = tx.bucket(bucket_name).create_schema(
                 schema_name, fail_if_exists=False
@@ -186,15 +252,48 @@ def _probe_projection(
                 sorted_columns=SORTING_KEY,
                 unsorted_columns=UNSORTED_PROJECTION_COLUMNS,
             )
-            print("PROJECTION SUCCESS: semi-sorted projection was created.")
-            print(f"created projection handle: {projection}")
+            print(f"PROJECTION DDL SUCCESS: created {projection}")
 
-            table.drop()
-            created = False
-            print("Dropped the projection test table.")
+            batch = _make_probe_rows(columns, num_row_keys)
+            table.insert(batch)
+            print(f"inserted {batch.num_rows} rows")
+
+        # 2) Let projection maintenance run, then read it back.
+        if settle_seconds > 0:
+            print(f"waiting {settle_seconds:.1f}s for projection maintenance")
+            time.sleep(settle_seconds)
+
+        with session.transaction() as tx:
+            table = tx.bucket(bucket_name).schema(schema_name).table(table_name)
+            stats = table.projection("by_row_key").stats
+            stats_rows = stats.num_rows if stats is not None else None
+            base_rows = _read_row_count(table, use_projection=False)
+            projection_rows = _read_row_count(table, use_projection=True)
+
+        print(f"projection.stats.num_rows:    {stats_rows}")
+        print(f"base-table read rows:         {base_rows}")
+        print(f"forced-projection read rows:  {projection_rows}")
+
+        if base_rows > 0 and projection_rows == 0:
+            print(
+                "PROJECTION READ BUG REPRODUCED: base-table read returns rows but "
+                "the forced semi-sorted projection read returns zero "
+                "(projection never materializes the inserted rows)."
+            )
+            return False
+        if projection_rows == base_rows:
+            print(
+                "PROJECTION READ OK: forced-projection read matches the base-table "
+                "row count (zero-rows bug did NOT reproduce on this cluster)."
+            )
             return True
+        print(
+            f"PROJECTION READ MISMATCH: base={base_rows} forced-projection="
+            f"{projection_rows} (unexpected partial result)."
+        )
+        return False
     except Exception as exc:
-        print("PROJECTION FAILURE REPRODUCED")
+        print("PROJECTION PROBE FAILURE")
         _print_exception(exc)
         return False
     finally:
@@ -273,6 +372,8 @@ def main() -> int:
                 schema_name,
                 projection_table_name,
                 columns,
+                num_row_keys=args.num_row_keys,
+                settle_seconds=args.settle_seconds,
             )
         )
 
