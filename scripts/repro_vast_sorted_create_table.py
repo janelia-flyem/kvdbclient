@@ -5,6 +5,7 @@ Run from repos/kvdbclient with credentials in the environment:
 
     pixi run python scripts/repro_vast_sorted_create_table.py
     pixi run python scripts/repro_vast_sorted_create_table.py --probe projection
+    pixi run python scripts/repro_vast_sorted_create_table.py --probe add-sorting-key
     pixi run python scripts/repro_vast_sorted_create_table.py --probe both
 
 Required environment:
@@ -82,9 +83,13 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--probe",
-        choices=("sorted", "projection", "both"),
+        choices=("sorted", "projection", "add-sorting-key", "both"),
         default=os.environ.get("VAST_PROBE", "sorted"),
-        help="which probe to run; default: sorted",
+        help=(
+            "which probe to run; default: sorted. 'add-sorting-key' tests the "
+            "admin-suggested workaround (create unsorted, then "
+            "table.add_sorting_key); 'both' runs all three"
+        ),
     )
     parser.add_argument(
         "--num-row-keys",
@@ -301,6 +306,78 @@ def _probe_projection(
             _cleanup_table(session, bucket_name, schema_name, table_name)
 
 
+def _probe_add_sorting_key(
+    session,
+    bucket_name: str,
+    schema_name: str,
+    table_name: str,
+    columns: pa.Schema,
+    num_row_keys: int,
+) -> bool:
+    """Admin-suggested workaround: create an UNSORTED table, optionally insert
+    rows, then `table.add_sorting_key(["row_key"])`. That call uses the
+    ``alter_table`` RPC (``vastdb/table.py:add_sorting_key`` -> ``api.alter_table``),
+    a different server path than ``create_table(sorting_key=...)`` which 500s on
+    this cluster. Verify the table becomes Elysium-sorted on row_key and stays
+    readable.
+    """
+    created = False
+    try:
+        # 1) Create UNSORTED (the path that works on this cluster) + optional rows.
+        with session.transaction() as tx:
+            schema = tx.bucket(bucket_name).create_schema(
+                schema_name, fail_if_exists=False
+            )
+            print("Calling schema.create_table(...) WITHOUT sorting_key (unsorted)")
+            table = schema.create_table(table_name, columns, fail_if_exists=True)
+            created = True
+            if num_row_keys > 0:
+                batch = _make_probe_rows(columns, num_row_keys)
+                table.insert(batch)
+                print(f"inserted {batch.num_rows} rows into the unsorted table")
+
+        # 2) Add the sorting key post-hoc via alter_table (the workaround).
+        with session.transaction() as tx:
+            table = tx.bucket(bucket_name).schema(schema_name).table(table_name)
+            print(
+                f"Calling table.add_sorting_key({SORTING_KEY!r})  "
+                "# alter_table, not create_table"
+            )
+            table.add_sorting_key(SORTING_KEY)
+            print("ADD_SORTING_KEY SUCCESS: alter_table accepted the sorting key")
+
+        # 3) Verify the table is now sorted on row_key and still readable.
+        with session.transaction() as tx:
+            table = tx.bucket(bucket_name).schema(schema_name).table(table_name)
+            sorted_names = [field.name for field in table.sorted_columns()]
+            rows = (
+                table.select(columns=list(columns.names), predicate=None)
+                .read_all()
+                .num_rows
+            )
+        print(f"sorted_columns after add_sorting_key: {sorted_names}")
+        print(f"rows readable after add_sorting_key: {rows}")
+
+        if sorted_names[: len(SORTING_KEY)] == SORTING_KEY:
+            print(
+                "WORKAROUND CONFIRMED: table is now Elysium-sorted on row_key via "
+                "add_sorting_key — the create_table(sorting_key=...) 500 is bypassed."
+            )
+            return True
+        print(
+            "UNEXPECTED: add_sorting_key returned without error but sorted_columns "
+            f"is {sorted_names}, expected to start with {SORTING_KEY}."
+        )
+        return False
+    except Exception as exc:
+        print("ADD_SORTING_KEY FAILURE (workaround did not work on this cluster)")
+        _print_exception(exc)
+        return False
+    finally:
+        if created:
+            _cleanup_table(session, bucket_name, schema_name, table_name)
+
+
 def main() -> int:
     args = _parse_args()
     endpoint = _required_env("VAST_ENDPOINT")
@@ -374,6 +451,21 @@ def main() -> int:
                 columns,
                 num_row_keys=args.num_row_keys,
                 settle_seconds=args.settle_seconds,
+            )
+        )
+
+    if args.probe in {"add-sorting-key", "both"}:
+        altersort_table_name = (
+            table_name if args.probe == "add-sorting-key" else f"{table_name}_altersort"
+        )
+        results.append(
+            _probe_add_sorting_key(
+                session,
+                bucket_name,
+                schema_name,
+                altersort_table_name,
+                columns,
+                num_row_keys=args.num_row_keys,
             )
         )
 
