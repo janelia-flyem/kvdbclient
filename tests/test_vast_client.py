@@ -155,6 +155,38 @@ class TestVastHelpers:
         assert [cell.value for cell in cells] == [{"version": 2}, {"version": 1}]
         assert all(cell.timestamp.tzinfo is timezone.utc for cell in cells)
 
+    def test_column_filter_restricts_to_requested(self):
+        ts = datetime(2026, 6, 25, 12, 0, 0, tzinfo=timezone.utc)
+        child = attributes.Hierarchy.Child
+        parent = attributes.Hierarchy.Parent
+        row_key = "00000000000000000100"
+        rows = [
+            {
+                vast_utils.ROW_KEY: row_key,
+                vast_utils.FAMILY: child.family_id,
+                vast_utils.QUALIFIER: child.key,
+                vast_utils.TIMESTAMP: vast_utils.to_vast_timestamp(ts),
+                vast_utils.VALUE: child.serialize(np.array([10], dtype=basetypes.NODE_ID)),
+            },
+            {
+                vast_utils.ROW_KEY: row_key,
+                vast_utils.FAMILY: parent.family_id,
+                vast_utils.QUALIFIER: parent.key,
+                vast_utils.TIMESTAMP: vast_utils.to_vast_timestamp(ts),
+                vast_utils.VALUE: parent.serialize(np.uint64(42)),
+            },
+        ]
+        key = vast_utils.decode_row_key(row_key)
+
+        # No filter -> all columns present for the row.
+        both = vast_utils.rows_to_column_dicts(rows)
+        assert set(both[key]) == {child, parent}
+
+        # Multi-column reads are filtered client-side (VAST can't push the OR of
+        # (family AND qualifier) clauses), so only the requested column returns.
+        only_child = vast_utils.rows_to_column_dicts(rows, columns=(child,))
+        assert set(only_child[key]) == {child}
+
     def test_chunked(self):
         assert list(vast_utils.chunked(range(5), 2)) == [[0, 1], [2, 3], [4]]
 

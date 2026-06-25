@@ -118,16 +118,6 @@ def make_record_batch(cell_rows: Sequence[dict]):
     return pa.record_batch([data[name] for name in CELL_FIELD_NAMES], schema=schema)
 
 
-def _or_predicates(predicates):
-    predicates = list(predicates)
-    if not predicates:
-        return None
-    predicate = predicates[0]
-    for next_predicate in predicates[1:]:
-        predicate = predicate | next_predicate
-    return predicate
-
-
 def _and_predicates(predicates):
     predicates = [predicate for predicate in predicates if predicate is not None]
     if not predicates:
@@ -169,11 +159,13 @@ def column_predicate(table, columns=None):
     columns = normalize_columns(columns)
     if columns is None:
         return None
-    predicates = []
-    for column in columns:
-        family, qualifier = attribute_to_columns(column)
-        predicates.append((table[FAMILY] == family) & (table[QUALIFIER] == qualifier))
-    return _or_predicates(predicates)
+    # VAST's predicate serializer cannot express an OR of (family AND qualifier)
+    # clauses, so only a single-column filter (a plain AND) is pushed down.
+    # Multi-column requests are filtered client-side in rows_to_column_dicts.
+    if len(columns) != 1:
+        return None
+    family, qualifier = attribute_to_columns(columns[0])
+    return (table[FAMILY] == family) & (table[QUALIFIER] == qualifier)
 
 
 def time_predicate(
@@ -237,7 +229,8 @@ def build_predicate(
     )
 
 
-def rows_to_column_dicts(rows, *, single_column=None, deserialize=True):
+def rows_to_column_dicts(rows, *, columns=None, single_column=None, deserialize=True):
+    wanted = set(columns) if columns is not None else None
     grouped = defaultdict(lambda: defaultdict(list))
     sorted_rows = sorted(
         rows,
@@ -253,6 +246,8 @@ def rows_to_column_dicts(rows, *, single_column=None, deserialize=True):
         try:
             attr = attribute_from_columns(row[FAMILY], row[QUALIFIER])
         except KeyError:
+            continue
+        if wanted is not None and attr not in wanted:
             continue
         value = row[VALUE]
         if deserialize:

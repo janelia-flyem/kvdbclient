@@ -378,6 +378,7 @@ class Client(ClientWithIDGen, OperationLogger):
 
         return vast_utils.rows_to_column_dicts(
             raw_rows,
+            columns=vast_utils.normalize_columns(columns),
             single_column=single_column,
             deserialize=True,
         )
