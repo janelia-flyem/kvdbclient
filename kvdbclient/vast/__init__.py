@@ -11,7 +11,17 @@ _vastconfig_fields = (
     "BUCKET",
     "SCHEMA",
     "MAX_ROW_KEY_COUNT",
+    "SORTED",
 )
+
+
+def _env_bool(name, default):
+    value = environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
 _vastconfig_defaults = (
     environ.get("VAST_ENDPOINT", DEFAULT_ENDPOINT),
     environ.get("VAST_ACCESS_KEY"),
@@ -19,6 +29,7 @@ _vastconfig_defaults = (
     environ.get("VAST_BUCKET"),
     environ.get("VAST_SCHEMA", DEFAULT_SCHEMA),
     1000,
+    _env_bool("VAST_SORTED", True),
 )
 _VastConfigBase = namedtuple(
     "VastConfig", _vastconfig_fields, defaults=_vastconfig_defaults
@@ -52,6 +63,7 @@ def get_client_info(
     endpoint: str = None,
     bucket: str = None,
     schema: str = None,
+    sorted: bool = None,
 ):
     """Helper function to load config from env."""
     _endpoint = environ.get("VAST_ENDPOINT", DEFAULT_ENDPOINT)
@@ -66,10 +78,15 @@ def get_client_info(
     if schema:
         _schema = schema
 
+    _sorted = _env_bool("VAST_SORTED", True)
+    if sorted is not None:
+        _sorted = sorted
+
     return VastConfig(
         ENDPOINT=_endpoint,
         ACCESS_KEY=environ.get("VAST_ACCESS_KEY"),
         SECRET_KEY=environ.get("VAST_SECRET_KEY"),
         BUCKET=_bucket,
         SCHEMA=_schema,
+        SORTED=_sorted,
     )

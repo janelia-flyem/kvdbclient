@@ -123,8 +123,7 @@ class Client(ClientWithIDGen, OperationLogger):
     def _table(self, tx, fail_if_missing=True):
         return self._schema(tx).table(self._table_id, fail_if_missing=fail_if_missing)
 
-    @staticmethod
-    def _validate_table(table):
+    def _validate_table(self, table):
         expected = vast_utils.cells_schema()
         actual = table.columns()
         if actual.names != expected.names:
@@ -138,6 +137,9 @@ class Client(ClientWithIDGen, OperationLogger):
                     f"VAST table column {field.name!r} has type "
                     f"{actual_field.type}, expected {field.type}"
                 )
+
+        if not self._config.SORTED:
+            return
 
         sorted_names = [field.name for field in table.sorted_columns()]
         if sorted_names[:1] != vast_utils.SORTING_KEY:
@@ -155,7 +157,8 @@ class Client(ClientWithIDGen, OperationLogger):
         session = self._connect()
         created = False
         with session.transaction() as tx:
-            tx._rpc.features.check_elysium()
+            if self._config.SORTED:
+                tx._rpc.features.check_elysium()
             schema = self._schema(tx)
             table = schema.table(self._table_id, fail_if_missing=False)
             if table is not None:
@@ -166,7 +169,9 @@ class Client(ClientWithIDGen, OperationLogger):
                     self._table_id,
                     vast_utils.cells_schema(),
                     fail_if_exists=True,
-                    sorting_key=vast_utils.SORTING_KEY,
+                    sorting_key=(
+                        vast_utils.SORTING_KEY if self._config.SORTED else []
+                    ),
                 )
                 created = True
             self._validate_table(table)

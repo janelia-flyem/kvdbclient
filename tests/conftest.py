@@ -224,7 +224,7 @@ def vast_live_config():
 
     from kvdbclient.vast import get_client_info
 
-    config = get_client_info(schema=test_schema)
+    config = get_client_info(schema=test_schema, sorted=False)
     missing = [
         name
         for name in ("ENDPOINT", "ACCESS_KEY", "SECRET_KEY", "BUCKET")
@@ -233,7 +233,14 @@ def vast_live_config():
     if missing:
         pytest.fail(f"incomplete VAST_* connection settings: missing {missing}")
     assert config.SCHEMA == test_schema  # guard against env-precedence surprises
+    assert config.SORTED is False  # live MVP runs unsorted on VAST 5.4.3.1
     return config
+
+
+@pytest.fixture(scope="session")
+def vast_sorted_config(vast_live_config):
+    """Live config for the preserved sorted-table path smoke."""
+    return vast_live_config._replace(SORTED=True)
 
 
 @pytest.fixture()
@@ -304,6 +311,17 @@ def vast_client_no_table(vast_live_config):
     finally:
         client.close()
         _drop_vast_test_table(vast_live_config, table_id)
+
+
+@pytest.fixture()
+def vast_sorted_client_no_table(vast_sorted_config):
+    table_id = vast_test_table_name()
+    client = VastClient(table_id=table_id, config=vast_sorted_config)
+    try:
+        yield client
+    finally:
+        client.close()
+        _drop_vast_test_table(vast_sorted_config, table_id)
 
 
 @pytest.fixture()

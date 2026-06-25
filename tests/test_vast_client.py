@@ -11,6 +11,7 @@ from kvdbclient import basetypes
 from kvdbclient.base import ColumnFamilyConfig
 from kvdbclient.serializers import serialize_uint64
 from kvdbclient.vast import VastConfig
+from kvdbclient.vast import get_client_info
 from kvdbclient.vast import utils as vast_utils
 from kvdbclient.vast.client import Client as VastClient
 
@@ -40,6 +41,16 @@ class TestVastFactoryWiring:
 
 
 class TestVastConfigRedaction:
+    def test_sorted_default_and_explicit_unsorted(self):
+        assert VastConfig().SORTED is True
+        config = VastConfig(SORTED=False)
+        assert config.SORTED is False
+
+    def test_get_client_info_reads_vast_sorted_env(self, monkeypatch):
+        monkeypatch.setenv("VAST_SORTED", "false")
+        config = get_client_info()
+        assert config.SORTED is False
+
     def test_repr_and_str_redact_secrets(self):
         config = VastConfig(
             ENDPOINT="http://vast.example",
@@ -61,6 +72,21 @@ class TestVastConfigRedaction:
         assert isinstance(replaced, VastConfig)
         assert "abcd1234" not in repr(replaced)
         assert replaced.SCHEMA == "pcgvast_test"
+
+
+class _FakeVastTable:
+    def __init__(self, *, sorted_names=(), fail_on_sorted_columns=False):
+        self._sorted_names = sorted_names
+        self._fail_on_sorted_columns = fail_on_sorted_columns
+
+    def columns(self):
+        return vast_utils.cells_schema()
+
+    def sorted_columns(self):
+        if self._fail_on_sorted_columns:
+            raise AssertionError("unsorted validation should not inspect sort columns")
+        schema = vast_utils.cells_schema()
+        return [schema.field(name) for name in self._sorted_names]
 
 
 class TestVastHelpers:
@@ -132,6 +158,15 @@ class TestVastHelpers:
     def test_chunked(self):
         assert list(vast_utils.chunked(range(5), 2)) == [[0, 1], [2, 3], [4]]
 
+    def test_unsorted_table_validation_skips_sort_columns(self):
+        client = VastClient("test_table", config=VastConfig(SORTED=False))
+        client._validate_table(_FakeVastTable(fail_on_sorted_columns=True))
+
+    def test_sorted_table_validation_requires_row_key_sort(self):
+        client = VastClient("test_table", config=VastConfig(SORTED=True))
+        with pytest.raises(ValueError, match="must be sorted"):
+            client._validate_table(_FakeVastTable(sorted_names=()))
+
 
 # -- Live connectivity and read/write primitives ---------------------------------
 
@@ -174,6 +209,21 @@ class TestVastCreateTable:
         client.create_table({"custom": True}, "1.0", column_families=families)
         assert client.read_table_version() == "1.0"
         assert client.read_table_meta() == {"custom": True}
+
+    def test_sorted_create_table_cluster_xfail(self, vast_sorted_client_no_table):
+        client = vast_sorted_client_no_table
+        try:
+            client.create_table({"sorted": True}, "1.0")
+        except Exception as exc:
+            text = f"{type(exc).__name__}: {exc!r}"
+            if "InternalServerError" in text or "500" in text:
+                pytest.xfail(
+                    "cluster 5.4.3.1 sorted-table create returns server-side "
+                    "500; see sessions/reports/vast-live-grounding.md"
+                )
+            raise
+        assert client._config.SORTED is True
+        assert client.read_table_meta() == {"sorted": True}
 
 
 @pytest.mark.integration
